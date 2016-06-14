@@ -68,7 +68,29 @@ PathItem.inject(new function() {
         return result;
     }
 
+    var scaleFactor = 1;
+    var textAngle = 0;
+    var fontSize = 5;
+
+    var segmentOffset;
+    var pathCount;
+
+    function initializeReporting() {
+        scaleFactor = Base.pick(window.scaleFactor, scaleFactor);
+        textAngle = Base.pick(window.textAngle, 0);
+        segmentOffset = {};
+    }
+
     function computeBoolean(path1, path2, operation) {
+        initializeReporting();
+        var reportSegments = window.reportSegments;
+        var reportWindings = window.reportWindings;
+        var reportIntersections = window.reportIntersections;
+        if (path2) {
+            window.reportSegments = false;
+            window.reportWindings = false;
+            window.reportIntersections = false;
+        }
         // Retrieve the operator lookup table for winding numbers.
         var operator = operators[operation];
         // Add a simple boolean property to check for a given operation,
@@ -83,6 +105,10 @@ PathItem.inject(new function() {
         // i.e. subtraction(A:Path, B:Path):CompoundPath etc.
         var _path1 = preparePath(path1, true),
             _path2 = path2 && path1 !== path2 && preparePath(path2, true);
+        operator[operation] = true;
+        window.reportSegments = reportSegments;
+        window.reportWindings = reportWindings;
+        window.reportIntersections = reportIntersections;
         // Give both paths the same orientation except for subtraction
         // and exclusion, where we need them at opposite orientation.
         if (_path2 && (operator.subtract || operator.exclude)
@@ -183,6 +209,19 @@ PathItem.inject(new function() {
         return createResult(Group, paths, false, path1, path2);
     }
 
+    function logIntersection(inter) {
+        var other = inter._intersection;
+        var log = ['Intersection', inter._id, 'id', inter.getPath()._id,
+            'i', inter.getIndex(), 't', inter.getParameter(),
+            'o', inter.hasOverlap(), 'p', inter.getPoint(),
+            'Other', other._id, 'id', other.getPath()._id,
+            'i', other.getIndex(), 't', other.getParameter(),
+            'o', other.hasOverlap(), 'p', other.getPoint()];
+        console.log(log.map(function(v) {
+            return v == null ? '-' : v;
+        }).join(' '));
+    }
+
     /*
      * Creates linked lists between intersections through their _next and _prev
      * properties.
@@ -221,6 +260,21 @@ PathItem.inject(new function() {
      * @private
      */
     function divideLocations(locations, include) {
+        if (window.reportIntersections) {
+            console.log('Crossings', locations.length / 2);
+            locations.forEach(function(inter) {
+                if (inter._other)
+                    return;
+                logIntersection(inter);
+                new Path.Circle({
+                    center: inter.point,
+                    radius: 2 * scaleFactor,
+                    strokeColor: 'red',
+                    strokeScaling: false
+                });
+            });
+        }
+
         var results = include && [],
             tMin = /*#=*/Numerical.CURVETIME_EPSILON,
             tMax = 1 - tMin,
@@ -291,6 +345,15 @@ PathItem.inject(new function() {
         // once we are done with the entire curve.
         for (var i = 0, l = clearCurves.length; i < l; i++) {
             clearCurves[i].clearHandles();
+        }
+
+        if (window.reportIntersections) {
+            console.log('Split Crossings');
+            locations.forEach(function(inter) {
+                if (!inter._other) {
+                    logIntersection(inter);
+                }
+            });
         }
         return results || locations;
     }
@@ -494,6 +557,85 @@ PathItem.inject(new function() {
      * @return {Path[]} the traced closed paths
      */
     function tracePaths(segments, operator) {
+        pathCount = 1;
+
+        function labelSegment(seg, label) {
+            var path = seg._path,
+                inter = seg._intersection,
+                other = inter && inter._segment,
+                nx1 = inter && inter._next,
+                nx2 = nx1 && nx1._next,
+                nx3 = nx2 && nx2._next,
+                intersections = {
+                    'ix': inter,
+                    'nx¹': nx1,
+                    'nx²': nx2,
+                    'nx³': nx3
+                };
+            label += '   id: ' + path._id + '.' + seg._index
+                    + (other ? ' -> ' + other._path._id + '.' + other._index
+                        : '')
+                    + '   vi: ' + (seg._visited ? 1 : 0)
+                    + '   pt: ' + seg._point
+                    + '   vd: ' + (isValid(seg) || isStart(seg))
+                    + '   ov: ' + !!(inter && inter.hasOverlap())
+                    + '   wi: ' + seg._winding;
+            for (var key in intersections) {
+                var ix = intersections[key],
+                    s = ix && ix._segment;
+                if (s) {
+                    label += '   ' + key + ': ' + s._path._id + '.' + s._index
+                            + '(' + ix._id + ')';
+                }
+            }
+            label += ' | ' + path._validOverlapsOnly + ', ' + path._overlapsOnly;
+            var item = path._parent instanceof CompoundPath
+                        ? path._parent : path,
+                color = item.strokeColor || item.fillColor || 'black',
+                point = seg.point,
+                key = Math.round(point.x / scaleFactor / 50)
+                    + ',' + Math.round(point.y / scaleFactor / 50),
+                offset = segmentOffset[key] || 0,
+                size = fontSize * scaleFactor,
+                text = new PointText({
+                    point: point.add(new Point(size, size / 2)
+                        .add(0, offset * size * 1.2)
+                        .rotate(textAngle)),
+                    content: label,
+                    justification: 'left',
+                    fillColor: color,
+                    fontSize: fontSize
+                });
+
+            segmentOffset[key] = offset + 1;
+            // TODO! PointText should have pivot in #point by default!
+            text.pivot = text.globalToLocal(text.point);
+            text.scale(scaleFactor);
+            text.rotate(textAngle);
+            new Path.Line({
+                from: text.point,
+                to: seg.point,
+                strokeColor: color,
+                strokeScaling: false
+            });
+            return text;
+        }
+
+        function drawSegment(seg, text, index) {
+            if (!window.reportSegments || window.reportFilter != null
+                    && pathCount != window.reportFilter)
+                return;
+            labelSegment(seg, '#' + pathCount + '.'
+                            + (path ? path._segments.length + 1 : 1)
+                            + ' (' + (index + 1) + '): ' + text);
+        }
+
+        if (window.reportWindings) {
+            for (var i = 0; i < segments.length; i++) {
+                labelSegment(segments[i], '');
+            }
+        }
+
         var paths = [],
             start,
             otherStart;
@@ -523,6 +665,26 @@ PathItem.inject(new function() {
                 var seg = inter._segment,
                     nextSeg = seg.getNext(),
                     nextInter = nextSeg && nextSeg._intersection;
+                if (window.reportSegments) {
+                    console.log('getIntersection()'
+                            + ', seg: ' + seg._path._id + '.' + seg._index
+                            + ', next: ' + nextSeg._path._id + '.'
+                                + nextSeg._index
+                            + ', seg vis:' + !!seg._visited
+                            + ', next vis:' + !!nextSeg._visited
+                            + ', next start:' + isStart(nextSeg)
+                            + ', seg wi:' + seg._winding
+                            + ', next wi:' + nextSeg._winding
+                            + ', seg vd:' + (isValid(seg) || isStart(seg))
+                            + ', next vd:' + (
+                                (isValid(nextSeg) || isStart(nextSeg))
+                                || nextInter && isValid(nextInter._segment))
+                            + ', seg ov: ' + !!(seg._intersection
+                                && seg._intersection.hasOverlap())
+                            + ', next ov: ' + !!(nextSeg._intersection
+                                && nextSeg._intersection.hasOverlap())
+                            + ', more: ' + (!!inter._next));
+                }
                 // See if this segment and the next are both not visited yet, or
                 // are bringing us back to the beginning, and are both valid,
                 // meaning they are part of the boolean result.
@@ -582,9 +744,26 @@ PathItem.inject(new function() {
             while (true) {
                 // For each segment we encounter, see if there are multiple
                 // intersections, and if so, pick the best one:
+                if (inter && window.reportSegments) {
+                    console.log('-----\n'
+                            + '#' + pathCount + '.'
+                                + (path ? path._segments.length + 1 : 1)
+                            + ', Before getIntersection()'
+                            + ', seg: ' + seg._path._id + '.' + seg._index
+                            + ', other: ' + inter._segment._path._id + '.'
+                                + inter._segment._index);
+                }
                 inter = inter && findBestIntersection(inter, seg) || inter;
                 // Get the reference to the other segment on the intersection.
                 var other = inter && inter._segment;
+                if (inter && window.reportSegments) {
+                    console.log('After getIntersection()'
+                            + ', seg: '
+                                + seg._path._id + '.' + seg._index
+                            + ', other: ' + inter._segment._path._id + '.'
+                                + inter._segment._index);
+                }
+                var crossed = false;
                 if (isStart(seg)) {
                     finished = true;
                 } else if (other) {
@@ -598,6 +777,8 @@ PathItem.inject(new function() {
                         // segment. See isValid()/getWinding() for explanations.
                         // We are at a crossing and the other segment is part of
                         // the boolean result, switch over.
+                        drawSegment(seg, 'cross', i);
+                        crossed = true;
                         // We need to mark segments as visited when processing
                         // intersection and subtraction.
                         if (operator
@@ -609,9 +790,19 @@ PathItem.inject(new function() {
                 }
                 // Bail out if we're done, or if we encounter an already visited
                 // next segment.
-                if (finished || seg._visited) {
-                    // It doesn't hurt to set again to share some code.
+                if (finished) {
+                    drawSegment(seg, 'done', i);
                     seg._visited = true;
+                    break;
+                }
+                if (seg._visited) {
+                    // We didn't manage to switch, so stop right here.
+                    console.info('Visited segment encountered, aborting #'
+                            + pathCount + '.'
+                            + (path ? path._segments.length + 1 : 1)
+                            + ', id: ' + seg._path._id + '.' + seg._index
+                            + ', multiple: ' + !!(inter && inter._next));
+                    drawSegment(seg, 'visited', i);
                     break;
                 }
                 // If there are only valid overlaps and we encounter and invalid
@@ -620,6 +811,9 @@ PathItem.inject(new function() {
                 // see findBestIntersection()
                 if (seg._path._validOverlapsOnly && !isValid(seg))
                     break;
+                if (!crossed) {
+                    drawSegment(seg, 'add', i);
+                }
                 if (!path) {
                     path = new Path(Item.NO_INSERT);
                     start = seg;
@@ -633,6 +827,10 @@ PathItem.inject(new function() {
                 var next = seg.getNext();
                 path.add(new Segment(seg._point, handleIn,
                         next && seg._handleOut));
+               if (window.reportSegments) {
+                    console.log('Added', seg._path._id + '.' + seg._index
+                            + ': ' + path.lastSegment);
+                }
                 seg._visited = true;
                 // If this is the end of an open path, go back to its first
                 // segment but ignore its handleIn (see above for handleOut).
@@ -645,6 +843,11 @@ PathItem.inject(new function() {
                 // handleIn to the first segment.
                 path.firstSegment.setHandleIn(handleIn);
                 path.setClosed(true);
+                if (window.reportSegments) {
+                    console.log('Boolean operation completed',
+                            '#' + pathCount + '.' +
+                            (path ? path._segments.length + 1 : 1));
+                }
             } else if (path) {
                 // Only complain about open paths if they would actually contain
                 // an area when closed. Open paths that can silently discarded
@@ -656,10 +859,23 @@ PathItem.inject(new function() {
                 if (Math.abs(area) >= /*#=*/Numerical.GEOMETRIC_EPSILON) {
                     // This path wasn't finished and is hence invalid.
                     // Report the error to the console for the time being.
-                    console.error('Boolean operation resulted in open path',
+                    var colors = ['cyan', 'green', 'orange', 'yellow'];
+                    var color = new Color(
+                            colors[pathCount % (colors.length - 1)]);
+                    console.error('%cBoolean operation results in open path',
+                            'background: ' + color.toCSS() + '; color: #fff;',
                             'segments =', path._segments.length,
                             'length =', path.getLength(),
-                            'area=', area);
+                            'area=', area,
+                            '#' + pathCount + '.' +
+                                (path ? path._segments.length + 1 : 1));
+                    if (window.reportTraces) {
+                        paper.project.activeLayer.addChild(path);
+                        color.alpha = 0.5;
+                        path.strokeColor = color;
+                        path.strokeWidth = 3;
+                        path.strokeScaling = false;
+                    }
                 }
                 path = null;
             }
@@ -672,6 +888,7 @@ PathItem.inject(new function() {
                 paths.push(path);
                 path = null;
             }
+            pathCount++;
         }
         return paths;
     }
@@ -765,6 +982,7 @@ PathItem.inject(new function() {
          * compound-path is created, replacing the current one.
          */
         resolveCrossings: function() {
+            initializeReporting();
             var children = this._children,
                 // Support both path and compound-path items
                 paths = children || [this];
