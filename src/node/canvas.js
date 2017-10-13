@@ -12,10 +12,10 @@
 
 // Add some useful extensions to HTMLCanvasElement:
 // - HTMLCanvasElement#type, so we can switch to a PDF canvas
-// - Various Node Canvas methods, routed through from HTMLCanvasElement:
-//   toBuffer, pngStream, createPNGStream, jpgStream, createJPGStream
+// - Various Node-Canvas methods, routed through from HTMLCanvasElement:
+//   toBuffer, pngStream, createPNGStream, jpegStream, createJPEGStream
 
-module.exports = function(window) {
+module.exports = function(self, requireName) {
     var Canvas;
     try {
         Canvas = require('canvas');
@@ -25,14 +25,17 @@ module.exports = function(window) {
         // - On the browser, this corresponds to a worker context.
         // - On Node.js, it basically means the canvas is missing or not working
         //   which can be treated the same way.
-        delete window.window;
-        console.info(
-                'Unable to load Canvas module. Running in a headless context.');
+        delete self.window;
+        // Check the required module's name to see if it contains canvas, and
+        // only complain about its lack if the module requires it.
+        if (/\bcanvas\b/.test(requireName)) {
+            throw new Error('Unable to load canvas module.');
+        }
         return;
     }
 
-    var idlUtils = require('jsdom/lib/jsdom/living/generated/utils'),
-        HTMLCanvasElement = window.HTMLCanvasElement;
+    var HTMLCanvasElement = self.HTMLCanvasElement,
+        idlUtils = require('jsdom/lib/jsdom/living/generated/utils');
 
     // Add fake HTMLCanvasElement#type property:
     Object.defineProperty(HTMLCanvasElement.prototype, 'type', {
@@ -52,11 +55,12 @@ module.exports = function(window) {
     });
 
     // Extend HTMLCanvasElement with useful methods from the underlying Canvas:
-    ['toBuffer', 'pngStream', 'createPNGStream', 'jpgStream', 'createJPGStream']
-        .forEach(function(key) {
-            HTMLCanvasElement.prototype[key] = function() {
-                var canvas = idlUtils.implForWrapper(this)._canvas;
-                return canvas[key].apply(canvas, arguments);
-            };
-        });
+    var methods = ['toBuffer', 'pngStream', 'createPNGStream', 'jpegStream',
+        'createJPEGStream'];
+    methods.forEach(function(key) {
+        HTMLCanvasElement.prototype[key] = function() {
+            var canvas = idlUtils.implForWrapper(this)._canvas;
+            return canvas[key].apply(canvas, arguments);
+        };
+    });
 };
